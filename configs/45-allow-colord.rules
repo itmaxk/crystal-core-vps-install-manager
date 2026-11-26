@@ -1,3 +1,5 @@
+// Crystal-Core VPS Install Manager: убирает окна «Authentication required»
+// (colord / обновление списков пакетов) в RDP-сессиях. Для polkit >= 0.106 (Ubuntu 23.04+).
 polkit.addRule(function(action, subject) {
     if ((action.id == "org.freedesktop.color-manager.create-device" ||
          action.id == "org.freedesktop.color-manager.create-profile" ||
@@ -5,7 +7,11 @@ polkit.addRule(function(action, subject) {
          action.id == "org.freedesktop.color-manager.delete-profile" ||
          action.id == "org.freedesktop.color-manager.modify-device" ||
          action.id == "org.freedesktop.color-manager.modify-profile") &&
-        subject.isInGroup("{users}")) {
+        (subject.isInGroup("users") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.packagekit.system-sources-refresh" &&
+        subject.isInGroup("sudo")) {
         return polkit.Result.YES;
     }
 });

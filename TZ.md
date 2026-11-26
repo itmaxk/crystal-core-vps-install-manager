@@ -4,7 +4,7 @@
 * **Наименование продукта:** Crystal-Core VPS Install Manager (`vps-setup`).
 * **Назначение:** Автоматизированная первичная настройка, обновление и аудит состояния серверов под управлением Ubuntu LTS (22.04 / 24.04 и выше) в интерактивном (TUI) и неинтерактивном (CLI) режимах.
 * **Целевая платформа:** Linux (`amd64`, `arm64`), Ubuntu Server.
-* **Стек технологий:** Go 1.22+, `github.com/charmbracelet/huh`, `github.com/charmbracelet/lipgloss`, стандартная библиотека Go (`embed`, `text/template`, `net/http`, `encoding/json`, `flag`).
+* **Стек технологий:** Go 1.24+, `github.com/charmbracelet/huh`, `github.com/charmbracelet/lipgloss`, стандартная библиотека Go (`embed`, `text/template`, `net/http`, `encoding/json`, `flag`).
 
 ## 2. Цели разработки
 1. Сократить время первичной подготовки Ubuntu VPS с графическим интерфейсом, защитой и AI-инструментами до одного запуска бинарника.
@@ -19,12 +19,17 @@
 
 ## 4. Функциональные требования
 * **Брендинг:** при запуске (кроме `--status --json`) выводится баннер Crystal-Core с Unicode-кристаллом, описанием услуг автоматизации бизнеса и контактами (`https://crystal-core.com/`, `info@crystal-core.com`).
-* **17 модулей установки:** `upgrade_ubuntu`, `create_user`, `update`, `xfce`, `xrdp`, `kitty_fonts`, `ru_layout`, `zsh_starship`, `bbr`, `ssh_hardening`, `fail2ban_ufw`, `swap`, `unattended`, `ai_cli`, `docker`, `tailscale`, `ollama`.
-* **CLI-режимы:** `--status`, `--json`, `--only`, `--user`, `--ssh-port`, `--auto-reboot`, `--dry-run`, `--self-update`, `--version`.
+* **17 модулей установки** (в порядке выполнения): `create_user`, `update`, `swap`, `xfce`, `xrdp`, `ru_layout`, `kitty_fonts`, `zsh_starship`, `bbr`, `tailscale`, `ssh_hardening`, `fail2ban_ufw`, `unattended`, `ai_cli`, `docker`, `ollama`, `upgrade_ubuntu`.
+* **Порядок выполнения** фиксирован и не зависит от порядка выбора: первый запуск обычно идёт на сервере без графики, поэтому рабочий стол и RDP ставятся первыми, а `upgrade_ubuntu` (переход на новую LTS, требует перезагрузки) — последним.
+* **Быстрый старт:** при отсутствии XFCE/XRDP меню по умолчанию предлагает набор `create_user` (под root), `swap`, `xfce`, `xrdp`, `ru_layout`; в CLI — `--preset rdp`.
+* **CLI-режимы:** `--status`, `--json`, `--preset`, `--only`, `--new-user` (+ `VPS_SETUP_PASSWORD`), `--user`, `--ssh-port`, `--auto-reboot`, `--dry-run`, `--self-update`, `--version`.
 
 ## 5. Требования к безопасности и надежности
 * Пароль нового пользователя передается через `stdin` в `chpasswd` (исключение утечки в `ps aux` и логах).
-* Запрещено отключение парольной аутентификации SSH при отсутствии валидного `~/.ssh/authorized_keys`.
+* Запрещено отключение парольной аутентификации SSH при отсутствии валидного `~/.ssh/authorized_keys` и при целевом пользователе `root`; проверка выполняется до начала установки.
+* Порт SSH по умолчанию не меняется; при смене новый порт открывается в UFW/iptables до перезапуска sshd. UFW разрешает фактические порты sshd.
+* Ключи, переносимые новому пользователю, очищаются от опций `command="..."` (заглушки root в облачных образах).
+* `--self-update` проверяет SHA-256 по `checksums.txt` релиза.
 * Все Bash-скрипты выполняются в строгом режиме `bash -euo pipefail`.
 
 ## 6. Сборка, тестирование и приемка
