@@ -1,0 +1,18 @@
+
+# >>> vps-setup zsh >>>
+export PATH="$HOME/.local/bin:$PATH"
+
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt SHARE_HISTORY HIST_IGNORE_DUPS
+
+autoload -Uz compinit && compinit
+
+# Автодополнение по истории и подсветка синтаксиса
+source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+# Промпт Starship
+eval "$(starship init zsh)"
+# <<< vps-setup zsh <<<
