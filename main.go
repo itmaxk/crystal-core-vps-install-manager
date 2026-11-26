@@ -1410,10 +1410,10 @@ type githubRelease struct {
 }
 
 func githubToken() string {
-	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
+	if t := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); t != "" {
 		return t
 	}
-	return os.Getenv("GH_TOKEN")
+	return strings.TrimSpace(os.Getenv("GH_TOKEN"))
 }
 
 func githubGet(url, accept string, timeout time.Duration) (*http.Response, error) {
