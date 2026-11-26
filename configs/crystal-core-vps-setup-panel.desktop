@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Crystal-Core VPS Install Manager — значок на панели
-Comment=Один раз добавляет значок программы на нижнюю панель XFCE
-Exec=/usr/local/lib/vps-setup/panel.sh add
+Name=Crystal-Core VPS Install Manager — значки на панели
+Comment=Добавляет на нижнюю панель XFCE значки программ, установленных Crystal-Core VPS Install Manager
+Exec=/usr/local/lib/vps-setup/panel.sh sync
 OnlyShowIn=XFCE;
 NoDisplay=true
 X-GNOME-Autostart-enabled=true

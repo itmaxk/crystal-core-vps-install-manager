@@ -79,7 +79,7 @@ func getModuleDefs() []ModuleDef {
 		},
 		{
 			ID:          "panel_launcher",
-			Title:       "Значок программы на панели XFCE",
+			Title:       "Значок этой программы на панели XFCE",
 			Description: "запуск vps-setup с нижней панели и из меню «Приложения → Система»",
 			DefaultOn:   true,
 			Removable:   true,
@@ -96,7 +96,7 @@ func getModuleDefs() []ModuleDef {
 		{
 			ID:          "kitty_fonts",
 			Title:       "Терминал Kitty + Nerd Fonts",
-			Description: "быстрый терминал по умолчанию и шрифты JetBrainsMono / FiraCode с иконками",
+			Description: "быстрый терминал по умолчанию (значок на панели) и шрифты JetBrainsMono / FiraCode",
 			DefaultOn:   true,
 			Removable:   true,
 			IsReady: func(cfg Config) bool {
@@ -160,7 +160,7 @@ func getModuleDefs() []ModuleDef {
 		{
 			ID:          "ai_cli",
 			Title:       "AI CLI-инструменты",
-			Description: "Claude Code, Codex, OpenCode, Gemini, Aider + Node.js 22, uv, gh, ripgrep",
+			Description: "Claude Code, Codex, OpenCode, Gemini, Aider (значки на панели) + Node.js 22, uv, gh",
 			DefaultOn:   true,
 			Removable:   true,
 			IsReady: func(cfg Config) bool {
@@ -376,7 +376,7 @@ EOF
 		if err := writeUserFile(*cfg, "configs/kitty.conf", kittyConf, 0644, false); err != nil {
 			return err
 		}
-		return runBash(*cfg, `
+		err := runBash(*cfg, `
 			fix_user_dirs
 			apt_install kitty unzip curl fontconfig
 
@@ -415,6 +415,10 @@ EOF
 			done
 			as_user fc-cache -f
 		`)
+		if err != nil {
+			return err
+		}
+		return registerPanelItems(*cfg, []panelItem{kittyPanelItem()})
 
 	case "zsh_starship":
 		zshrcPath := filepath.Join(cfg.TargetHome, ".zshrc")
@@ -482,7 +486,7 @@ EOF
 		`)
 
 	case "ai_cli":
-		return runBash(*cfg, `
+		err := runBash(*cfg, `
 			apt_install curl ca-certificates gnupg ripgrep fd-find jq
 
 			# GitHub CLI из официального репозитория (в universe лежит сильно устаревшая версия).
@@ -517,6 +521,10 @@ EOF
 				uv tool install --python 3.12 --upgrade aider-chat
 			'
 		`)
+		if err != nil {
+			return err
+		}
+		return registerPanelItems(*cfg, installedAIToolItems(*cfg))
 
 	case "docker":
 		if !fileExists("/etc/docker/daemon.json") {

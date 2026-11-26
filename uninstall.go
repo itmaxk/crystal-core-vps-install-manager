@@ -347,6 +347,9 @@ func uninstallModule(mod string, cfg *Config) error {
 		if err != nil {
 			return err
 		}
+		if err := unregisterPanelItems(*cfg, []panelItem{kittyPanelItem()}); err != nil {
+			return err
+		}
 		return runBash(*cfg, "apt_purge_recorded", "KEEP_PKGS=unzip\ncurl\nfontconfig")
 	case "zsh_starship":
 		err := forEachModuleUser(mod, *cfg, func(u Config) error {
@@ -469,6 +472,9 @@ EOF
 			`)
 		})
 		if err != nil {
+			return err
+		}
+		if err := unregisterPanelItems(*cfg, allAIToolItems()); err != nil {
 			return err
 		}
 		return runBash(*cfg, `

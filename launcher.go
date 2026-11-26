@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -21,7 +22,26 @@ const (
 	autostartPath    = "/etc/xdg/autostart/crystal-core-vps-setup-panel.desktop"
 	iconPath         = "/usr/share/icons/hicolor/512x512/apps/crystal-core-vps-setup.png"
 	pixmapPath       = "/usr/share/pixmaps/crystal-core-vps-setup.png"
+	panelItemPrefix  = "crystal-core-"
 )
+
+// panelRegistryDir — список программ, значки которых должны быть на нижней панели XFCE.
+// panel.sh sync приводит панель каждого пользователя в соответствие с этим каталогом.
+var panelRegistryDir = "/usr/share/vps-setup/panel"
+
+// panelItem — программа, которую выносим на панель (и при необходимости в меню приложений).
+type panelItem struct {
+	Name    string // имя .desktop-файла, начинается с crystal-core-
+	Desktop string // содержимое .desktop-файла
+	SVGIcon string // своя иконка (SVG), если у программы её нет
+	Menu    bool   // добавить и в меню приложений (/usr/share/applications)
+}
+
+func (p panelItem) iconName() string { return strings.TrimSuffix(p.Name, ".desktop") }
+
+func (p panelItem) svgPath() string {
+	return "/usr/share/icons/hicolor/scalable/apps/" + p.iconName() + ".svg"
+}
 
 // installSelf копирует запущенный бинарник в /usr/local/bin/vps-setup, чтобы программу
 // можно было запускать командой `sudo vps-setup` и значком на панели.
@@ -77,61 +97,209 @@ apply_in_sessions() {
 }
 `
 
+const refreshDesktopCachesFn = `
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+	gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+	update-desktop-database -q /usr/share/applications || true
+fi
+`
+
+// registerPanelItems добавляет программы в список значков панели и сразу применяет его
+// в открытых XFCE-сессиях (в остальных — при следующем входе).
+func registerPanelItems(cfg Config, items []panelItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	for _, f := range []struct {
+		embed, dest string
+		perm        os.FileMode
+	}{
+		{"configs/vps-setup-panel.sh", panelScriptPath, 0755},
+		{"configs/crystal-core-vps-setup-panel.desktop", autostartPath, 0644},
+	} {
+		if err := writeEmbeddedFile(f.embed, f.dest, f.perm); err != nil {
+			return err
+		}
+	}
+	for _, it := range items {
+		if err := writeBytesFile(filepath.Join(panelRegistryDir, it.Name), []byte(it.Desktop), 0644, it.Name); err != nil {
+			return err
+		}
+		if it.Menu {
+			if err := writeBytesFile(filepath.Join("/usr/share/applications", it.Name), []byte(it.Desktop), 0644, it.Name); err != nil {
+				return err
+			}
+		}
+		if it.SVGIcon != "" {
+			if err := writeBytesFile(it.svgPath(), []byte(it.SVGIcon), 0644, it.Name+" (иконка)"); err != nil {
+				return err
+			}
+		}
+	}
+	return runBash(cfg, applyInSessionsFn+refreshDesktopCachesFn+`
+		apply_in_sessions sync
+	`, "PANEL_SCRIPT="+panelScriptPath)
+}
+
+// unregisterPanelItems убирает программы из списка значков, а их значки — с панелей:
+// в открытых сессиях сразу, у остальных пользователей — правкой сохранённой конфигурации.
+// Когда список пустеет, удаляются и panel.sh с автозапуском.
+func unregisterPanelItems(cfg Config, items []panelItem) error {
+	var names []string
+	for _, it := range items {
+		names = append(names, it.Name)
+		for _, p := range []string{filepath.Join(panelRegistryDir, it.Name), filepath.Join("/usr/share/applications", it.Name), it.svgPath()} {
+			if dryRun {
+				if fileExists(p) {
+					fmt.Println(dryStyle.Render("  [DRY-RUN] Удаление файла: " + p))
+				}
+				continue
+			}
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+
+	if err := runBash(cfg, applyInSessionsFn+refreshDesktopCachesFn+`
+		if [ -x "$PANEL_SCRIPT" ]; then
+			apply_in_sessions sync
+		fi
+	`, "PANEL_SCRIPT="+panelScriptPath); err != nil {
+		return err
+	}
+	if err := cleanupPanelConfigs(names); err != nil {
+		return err
+	}
+
+	remaining, _ := filepath.Glob(filepath.Join(panelRegistryDir, panelItemPrefix+"*.desktop"))
+	if len(remaining) == 0 && !dryRun {
+		for _, p := range []string{panelScriptPath, autostartPath} {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		_ = os.Remove(panelRegistryDir)
+		_ = os.Remove(filepath.Dir(panelRegistryDir))
+		_ = os.Remove(launcherLibDir)
+	}
+	return nil
+}
+
+// --- Значки конкретных программ ---
+
+func vpsSetupPanelItem() panelItem {
+	data, _ := configFS.ReadFile("configs/crystal-core-vps-setup.desktop")
+	return panelItem{Name: desktopFileName, Desktop: string(data)}
+}
+
+func kittyPanelItem() panelItem {
+	return panelItem{
+		Name: "crystal-core-kitty.desktop",
+		Desktop: `[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Kitty
+Comment=Быстрый терминал с поддержкой GPU
+Exec=kitty
+Icon=kitty
+Terminal=false
+Categories=System;TerminalEmulator;
+`,
+	}
+}
+
+// AI-утилиты консольные: значок открывает терминал с запущенной программой.
+// Запуск через `bash -lc`, чтобы подхватился ~/.local/bin (там живут uv и aider).
+type aiTool struct {
+	id, bin, title, comment, letters, color string
+}
+
+var aiTools = []aiTool{
+	{"claude", "claude", "Claude Code", "ИИ-ассистент для разработки в терминале", "Cl", "#D97757"},
+	{"codex", "codex", "Codex CLI", "ИИ-агент для кода в терминале", "Cx", "#1F2937"},
+	{"opencode", "opencode", "OpenCode", "Открытый ИИ-агент для кода в терминале", "OC", "#4B5563"},
+	{"gemini", "gemini", "Gemini CLI", "ИИ-ассистент в терминале", "Ge", "#3B6FE0"},
+	{"aider", "aider", "Aider", "Парное программирование с ИИ в git-репозитории", "Ai", "#0E9F8E"},
+}
+
+func (t aiTool) panelItem() panelItem {
+	name := panelItemPrefix + t.id + ".desktop"
+	return panelItem{
+		Name: name,
+		Menu: true,
+		Desktop: fmt.Sprintf(`[Desktop Entry]
+Version=1.0
+Type=Application
+Name=%s
+Comment=%s
+Exec=bash -lc %s
+Icon=%s
+Terminal=true
+Categories=Development;
+`, t.title, t.comment, t.bin, strings.TrimSuffix(name, ".desktop")),
+		SVGIcon: letterTileSVG(t.letters, t.color),
+	}
+}
+
+// letterTileSVG — простая иконка-плитка с буквами (без чужих логотипов).
+func letterTileSVG(letters, color string) string {
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="%s"/>
+  <rect x="4" y="4" width="120" height="60" rx="28" fill="#ffffff" fill-opacity="0.08"/>
+  <text x="64" y="82" text-anchor="middle" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="52" font-weight="bold" fill="#ffffff">%s</text>
+</svg>
+`, color, letters)
+}
+
+// installedAIToolItems — значки только для реально установленных утилит.
+func installedAIToolItems(cfg Config) []panelItem {
+	var items []panelItem
+	for _, t := range aiTools {
+		if dryRun || hasBin(t.bin) || fileExists(filepath.Join(cfg.TargetHome, ".local", "bin", t.bin)) {
+			items = append(items, t.panelItem())
+		}
+	}
+	return items
+}
+
+func allAIToolItems() []panelItem {
+	var items []panelItem
+	for _, t := range aiTools {
+		items = append(items, t.panelItem())
+	}
+	return items
+}
+
+// --- Модуль panel_launcher: сама программа в меню и на панели ---
+
 func moduleLauncher(cfg *Config) error {
 	if installed, err := installSelf(); err != nil {
 		return fmt.Errorf("не удалось скопировать программу в %s: %w", selfInstallPath, err)
 	} else if installed {
 		appendLog("Программа скопирована в " + selfInstallPath + "\n")
 	}
-
-	files := []struct {
-		embed string
-		dest  string
-		perm  os.FileMode
-	}{
-		{"configs/vps-setup-launch.sh", launchScriptPath, 0755},
-		{"configs/vps-setup-panel.sh", panelScriptPath, 0755},
-		{"configs/crystal-core-vps-setup.desktop", desktopFilePath, 0644},
-		{"configs/crystal-core-vps-setup-panel.desktop", autostartPath, 0644},
+	if err := writeEmbeddedFile("configs/vps-setup-launch.sh", launchScriptPath, 0755); err != nil {
+		return err
 	}
-	for _, f := range files {
-		if err := writeEmbeddedFile(f.embed, f.dest, f.perm); err != nil {
-			return err
-		}
+	if err := writeEmbeddedFile("configs/crystal-core-vps-setup.desktop", desktopFilePath, 0644); err != nil {
+		return err
 	}
 	for _, p := range []string{iconPath, pixmapPath} {
 		if err := writeBytesFile(p, iconPNG, 0644, "assets/icon.png"); err != nil {
 			return err
 		}
 	}
-
-	return runBash(*cfg, applyInSessionsFn+`
-		if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-			gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
-		fi
-		if command -v update-desktop-database >/dev/null 2>&1; then
-			update-desktop-database -q /usr/share/applications || true
-		fi
-		apply_in_sessions add
-	`, "PANEL_SCRIPT="+panelScriptPath)
+	return registerPanelItems(*cfg, []panelItem{vpsSetupPanelItem()})
 }
 
 func uninstallLauncher(cfg *Config) error {
-	err := runBash(*cfg, applyInSessionsFn+`
-		if [ -x "$PANEL_SCRIPT" ]; then
-			apply_in_sessions remove
-		fi
-	`, "PANEL_SCRIPT="+panelScriptPath)
-	if err != nil {
+	if err := unregisterPanelItems(*cfg, []panelItem{vpsSetupPanelItem()}); err != nil {
 		return err
 	}
-
-	// Пользователи без открытой сессии: убираем значок из сохранённой конфигурации панели.
-	if err := cleanupPanelConfigs(); err != nil {
-		return err
-	}
-
-	for _, p := range []string{desktopFilePath, autostartPath, iconPath, pixmapPath, launchScriptPath, panelScriptPath} {
+	for _, p := range []string{desktopFilePath, iconPath, pixmapPath, launchScriptPath} {
 		if dryRun {
 			fmt.Println(dryStyle.Render("  [DRY-RUN] Удаление файла: " + p))
 			continue
@@ -143,33 +311,29 @@ func uninstallLauncher(cfg *Config) error {
 	if !dryRun {
 		_ = os.Remove(launcherLibDir)
 	}
-	return runBash(*cfg, `
-		if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-			gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
-		fi
-		if command -v update-desktop-database >/dev/null 2>&1; then
-			update-desktop-database -q /usr/share/applications || true
-		fi
-	`)
+	return runBash(*cfg, refreshDesktopCachesFn)
 }
 
 var launcherDirRe = regexp.MustCompile(`launcher-(\d+)$`)
 
-// cleanupPanelConfigs убирает значок у пользователей, чья XFCE-сессия сейчас не запущена:
-// удаляет каталог ярлыка и номер плагина из plugin-ids в xfce4-panel.xml. Если xfconfd
-// пользователя работает, файл не трогаем — он перезаписал бы правку из памяти.
-func cleanupPanelConfigs() error {
+// cleanupPanelConfigs убирает значки names у пользователей, чья XFCE-сессия сейчас не
+// запущена: удаляет каталог ярлыка и номер плагина из plugin-ids в xfce4-panel.xml.
+// Если xfconfd пользователя работает, файл не трогаем — он перезаписал бы правку из памяти.
+func cleanupPanelConfigs(names []string) error {
 	homes, _ := filepath.Glob("/home/*")
 	homes = append(homes, "/root")
 	for _, home := range homes {
 		conf := filepath.Join(home, ".config")
-		marker := filepath.Join(conf, "vps-setup", "panel-added")
-		matches, _ := filepath.Glob(filepath.Join(conf, "xfce4", "panel", "launcher-*", desktopFileName))
-		if len(matches) == 0 && !fileExists(marker) {
+		var matches []string
+		for _, n := range names {
+			m, _ := filepath.Glob(filepath.Join(conf, "xfce4", "panel", "launcher-*", n))
+			matches = append(matches, m...)
+		}
+		if len(matches) == 0 {
 			continue
 		}
 		if dryRun {
-			fmt.Println(dryStyle.Render("  [DRY-RUN] Удаление значка из конфигурации панели в " + home))
+			fmt.Println(dryStyle.Render("  [DRY-RUN] Удаление значков из конфигурации панели в " + home))
 			continue
 		}
 		uid := fileOwner(home)
@@ -187,8 +351,12 @@ func cleanupPanelConfigs() error {
 				return err
 			}
 		}
-		_ = os.Remove(marker)
-		_ = os.Remove(filepath.Dir(marker))
+		for _, n := range names {
+			_ = os.Remove(filepath.Join(conf, "vps-setup", "panel", n))
+		}
+		if strings.Contains(strings.Join(names, " "), desktopFileName) {
+			_ = os.Remove(filepath.Join(conf, "vps-setup", "panel-added"))
+		}
 	}
 	return nil
 }

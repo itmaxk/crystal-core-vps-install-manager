@@ -2,6 +2,10 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
@@ -10,6 +14,7 @@ import (
 
 const (
 	actionStatus = "status"
+	actionUpdate = "update"
 	actionRemove = "remove"
 	actionExit   = "exit"
 	actionStart  = "start"
@@ -35,6 +40,7 @@ func newForm(groups ...*huh.Group) *huh.Form {
 // interactiveLoop — главное меню. Из любого подменю можно вернуться назад (Esc или пункт
 // «← Назад»); программа завершается только после выполнения операции или по «Выход».
 func interactiveLoop(base Config, autoReboot bool) {
+	startUpdateCheck()
 	for {
 		action, err := mainMenu(base)
 		if err != nil || action == actionExit {
@@ -46,6 +52,9 @@ func interactiveLoop(base Config, autoReboot bool) {
 		switch action {
 		case actionStatus:
 			printStatusTable(cfg)
+
+		case actionUpdate:
+			updateMenu()
 
 		case presetRDP, presetFull:
 			ok, err := installForm(&cfg, action)
@@ -95,6 +104,7 @@ func mainMenu(cfg Config) (string, error) {
 				huh.NewOption("Полная настройка — все рекомендуемые модули", presetFull),
 				huh.NewOption("Удаление установленных компонентов", actionRemove),
 				huh.NewOption("Состояние модулей", actionStatus),
+				huh.NewOption(updateMenuLabel(), actionUpdate),
 				huh.NewOption("Выход", actionExit),
 			).
 			Value(&action),
@@ -284,4 +294,93 @@ func removeForm(cfg *Config) (bool, error) {
 	}
 	cfg.Modules = orderForRemoval(cfg.Modules)
 	return decision == actionRemove, nil
+}
+
+// --- Обновление программы из меню ---
+
+// Проверка новой версии идёт в фоне с момента запуска, чтобы не задерживать меню:
+// если релиз новее, пункт меню подписывается «доступна vX».
+var updateState struct {
+	sync.Mutex
+	done bool
+	rel  githubRelease
+	err  error
+}
+
+func startUpdateCheck() {
+	go func() {
+		rel, err := fetchLatestRelease(10 * time.Second)
+		updateState.Lock()
+		updateState.done, updateState.rel, updateState.err = true, rel, err
+		updateState.Unlock()
+	}()
+}
+
+func cachedLatestRelease() (githubRelease, error, bool) {
+	updateState.Lock()
+	defer updateState.Unlock()
+	return updateState.rel, updateState.err, updateState.done
+}
+
+func updateMenuLabel() string {
+	label := "Обновить программу (сейчас " + Version + ")"
+	if rel, err, done := cachedLatestRelease(); done && err == nil && isNewerVersion(rel.TagName, Version) {
+		label = "Обновить программу — доступна " + rel.TagName + " (сейчас " + Version + ")"
+	}
+	return label
+}
+
+func updateMenu() {
+	rel, err, done := cachedLatestRelease()
+	if !done || err != nil {
+		err = withSpinner("Проверка обновлений", func() error {
+			var e error
+			rel, e = fetchLatestRelease(20 * time.Second)
+			return e
+		})
+		updateState.Lock()
+		updateState.done, updateState.rel, updateState.err = err == nil, rel, err
+		updateState.Unlock()
+	}
+	if err != nil {
+		fmt.Println(errStyle.Render("✖ " + err.Error()))
+		return
+	}
+	if !isNewerVersion(rel.TagName, Version) {
+		fmt.Println(okStyle.Render("✓ Установлена последняя версия (" + Version + ")"))
+		return
+	}
+
+	decision := actionUpdate
+	desc := "После обновления программа перезапустится уже в новой версии. " + backHint
+	if rel.HTMLURL != "" {
+		desc = "Что нового: " + rel.HTMLURL + "\n" + desc
+	}
+	err = newForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title(fmt.Sprintf("Доступна версия %s (у вас %s)", rel.TagName, Version)).
+			Description(desc).
+			Options(
+				huh.NewOption("⬇ Обновить и перезапустить", actionUpdate),
+				huh.NewOption("← Назад в главное меню", actionBack),
+			).
+			Value(&decision),
+	)).Run()
+	if err != nil || decision != actionUpdate {
+		return
+	}
+
+	path, err := applyUpdate(rel)
+	if err != nil {
+		fmt.Println(errStyle.Render("✖ Ошибка обновления: " + err.Error()))
+		return
+	}
+	if dryRun {
+		return
+	}
+	fmt.Println(dimStyle.Render("Перезапуск в версии " + rel.TagName + "..."))
+	if err := syscall.Exec(path, os.Args, os.Environ()); err != nil {
+		fmt.Println(warnStyle.Render("Не удалось перезапуститься автоматически (" + err.Error() + "). Запустите заново: sudo vps-setup"))
+		os.Exit(0)
+	}
 }

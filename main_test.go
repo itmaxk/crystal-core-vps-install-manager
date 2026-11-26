@@ -620,3 +620,27 @@ func TestSysInfoParsers(t *testing.T) {
 		}
 	}
 }
+
+func TestIsNewerVersion(t *testing.T) {
+	cases := []struct {
+		latest, current string
+		want            bool
+	}{
+		{"v1.1.0", "v1.0.1", true},
+		{"v1.2.0", "v1.10.0", false},
+		{"v1.10.0", "v1.9.3", true},
+		{"v2.0.0", "v1.99.99", true},
+		{"v1.1.0", "v1.1.0", false},
+		{"v1.0.1", "v1.1.0", false},
+		{"v1.1.0", "v1.1.0-3-gabc123-dirty", false},
+		{"v1.2.0", "v1.1.0-3-gabc123", true},
+		{"v1.1.0", "dev", true},
+		{"v1.1.0", "7707d9e-dirty", true},
+		{"nightly", "v1.0.0", false},
+	}
+	for _, c := range cases {
+		if got := isNewerVersion(c.latest, c.current); got != c.want {
+			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", c.latest, c.current, got, c.want)
+		}
+	}
+}

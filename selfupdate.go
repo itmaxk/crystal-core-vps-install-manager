@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,7 @@ type githubAsset struct {
 
 type githubRelease struct {
 	TagName string        `json:"tag_name"`
+	HTMLURL string        `json:"html_url"`
 	Assets  []githubAsset `json:"assets"`
 }
 
@@ -66,25 +68,76 @@ func assetDownloadURL(a githubAsset) (string, string) {
 	return a.BrowserDownloadURL, "application/octet-stream"
 }
 
+// fetchLatestRelease получает описание последнего релиза из GitHub.
+func fetchLatestRelease(timeout time.Duration) (githubRelease, error) {
+	var rel githubRelease
+	resp, err := githubGet(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo), "application/vnd.github+json", timeout)
+	if err != nil {
+		return rel, fmt.Errorf("не удалось получить данные о релизе: %w", err)
+	}
+	defer resp.Body.Close()
+	err = json.NewDecoder(resp.Body).Decode(&rel)
+	return rel, err
+}
+
+// parseVersion разбирает "v1.2.3" (допускается суффикс вида "-3-gabc-dirty").
+func parseVersion(v string) ([3]int, bool) {
+	var out [3]int
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if i := strings.IndexAny(v, "-+ "); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// isNewerVersion: latest новее current. Если текущая версия не номерная (dev-сборка),
+// обновлением считается любой релиз с другим тегом.
+func isNewerVersion(latest, current string) bool {
+	l, okL := parseVersion(latest)
+	c, okC := parseVersion(current)
+	if !okL {
+		return false
+	}
+	if !okC {
+		return latest != current
+	}
+	for i := 0; i < 3; i++ {
+		if l[i] != c[i] {
+			return l[i] > c[i]
+		}
+	}
+	// Тот же номер: сборка из коммитов после тега (v1.1.0-3-gabc) уже новее релиза.
+	return false
+}
+
 func selfUpdate() error {
 	fmt.Printf("Текущая версия: %s. Проверка обновлений...\n", Version)
-
-	resp, err := githubGet(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo), "application/vnd.github+json", 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("не удалось получить данные о релизе: %w", err)
-	}
-	var rel githubRelease
-	err = json.NewDecoder(resp.Body).Decode(&rel)
-	resp.Body.Close()
+	rel, err := fetchLatestRelease(30 * time.Second)
 	if err != nil {
 		return err
 	}
-
-	if rel.TagName == Version {
+	if !isNewerVersion(rel.TagName, Version) {
 		fmt.Println(okStyle.Render("✓ У вас уже установлена последняя версия (" + Version + ")"))
 		return nil
 	}
+	_, err = applyUpdate(rel)
+	return err
+}
 
+// applyUpdate скачивает бинарник из релиза, проверяет SHA-256 и заменяет им запущенный
+// файл (и копию в /usr/local/bin). Возвращает путь к обновлённому бинарнику.
+func applyUpdate(rel githubRelease) (string, error) {
 	expectedAsset := fmt.Sprintf("vps-setup-%s-%s", runtime.GOOS, runtime.GOARCH)
 	var binAsset, sumAsset *githubAsset
 	for i := range rel.Assets {
@@ -96,7 +149,7 @@ func selfUpdate() error {
 		}
 	}
 	if binAsset == nil {
-		return fmt.Errorf("файл %s не найден в релизе %s", expectedAsset, rel.TagName)
+		return "", fmt.Errorf("файл %s не найден в релизе %s", expectedAsset, rel.TagName)
 	}
 
 	var expectedSum string
@@ -104,16 +157,16 @@ func selfUpdate() error {
 		url, accept := assetDownloadURL(*sumAsset)
 		r, err := githubGet(url, accept, 30*time.Second)
 		if err != nil {
-			return fmt.Errorf("не удалось скачать checksums.txt: %w", err)
+			return "", fmt.Errorf("не удалось скачать checksums.txt: %w", err)
 		}
 		data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body.Close()
 		if err != nil {
-			return err
+			return "", err
 		}
 		expectedSum = findChecksum(string(data), expectedAsset)
 		if expectedSum == "" {
-			return fmt.Errorf("в checksums.txt нет контрольной суммы для %s", expectedAsset)
+			return "", fmt.Errorf("в checksums.txt нет контрольной суммы для %s", expectedAsset)
 		}
 	} else {
 		fmt.Println(warnStyle.Render("⚠ В релизе нет checksums.txt — контрольная сумма не проверяется"))
@@ -121,11 +174,16 @@ func selfUpdate() error {
 
 	exePath, err := os.Executable()
 	if err != nil {
-		return err
+		return "", err
 	}
 	exePath, err = filepath.EvalSymlinks(exePath)
 	if err != nil {
-		return err
+		return "", err
+	}
+
+	if dryRun {
+		fmt.Println(dryStyle.Render(fmt.Sprintf("  [DRY-RUN] Скачивание %s и замена %s", rel.TagName, exePath)))
+		return exePath, nil
 	}
 
 	url, accept := assetDownloadURL(*binAsset)
@@ -133,7 +191,7 @@ func selfUpdate() error {
 		return downloadAndReplace(url, accept, exePath, expectedSum)
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Println(okStyle.Render(fmt.Sprintf("✓ Успешно обновлено до версии %s", rel.TagName)))
@@ -144,7 +202,7 @@ func selfUpdate() error {
 			fmt.Println(warnStyle.Render("⚠ Не удалось обновить " + selfInstallPath + ": " + err.Error()))
 		}
 	}
-	return nil
+	return exePath, nil
 }
 
 func findChecksum(checksums, name string) string {
