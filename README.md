@@ -1,7 +1,7 @@
 # Crystal-Core VPS Install Manager
 
 <p align="center">
-  <img src="assets/icon.jpeg" alt="Crystal-Core VPS Install Manager" width="180" />
+  <img src="assets/icon.png" alt="Crystal-Core VPS Install Manager" width="180" />
 </p>
 
 **Crystal-Core VPS Install Manager** (`vps-setup`) — интерактивный TUI- и CLI-установщик на Go (Charmbracelet) для быстрой, безопасной и воспроизводимой настройки Ubuntu VPS под ключ: от обновления ОС и харденинга SSH до графической среды XFCE + XRDP, Docker и AI CLI-инструментов.
@@ -69,15 +69,15 @@ make release          # обе архитектуры + checksums.txt
 
 ## Первый запуск на новом сервере (без графики)
 
-```bash
-# со своего компьютера
-scp dist/vps-setup-linux-amd64 ubuntu@<IP_СЕРВЕРА>:vps-setup
-ssh ubuntu@<IP_СЕРВЕРА>
+Подключитесь по SSH и скачайте последний релиз под архитектуру сервера (amd64 или arm64):
 
-# на сервере
+```bash
+curl -fsSLo vps-setup "https://github.com/itmaxk/crystal-core-vps-install-manager/releases/latest/download/vps-setup-linux-$(dpkg --print-architecture)"
 chmod +x vps-setup
 sudo ./vps-setup
 ```
+
+Собранный локально бинарник можно передать и так: `scp dist/vps-setup-linux-amd64 ubuntu@<IP_СЕРВЕРА>:vps-setup`.
 
 В первом окне выберите **«Быстрый старт — рабочий стол XFCE + вход по RDP»**. Если у пользователя нет пароля (как у `ubuntu` в облачных образах), установщик попросит его задать: RDP-вход возможен только по паролю. Остальные модули можно поставить позже, повторным запуском с выбором «Полная настройка».
 
