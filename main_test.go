@@ -407,3 +407,216 @@ func TestFindChecksum(t *testing.T) {
 		t.Errorf("findChecksum для отсутствующего файла = %q", got)
 	}
 }
+
+func TestRemovalOrderAndRemovable(t *testing.T) {
+	me, _ := user.Current()
+	old := stateDir
+	stateDir = t.TempDir()
+	defer func() { stateDir = old }()
+	for _, m := range []string{"xfce", "xrdp", "ai_cli", "update"} {
+		_ = os.WriteFile(filepath.Join(stateDir, m+".installed"), nil, 0644)
+	}
+	_ = os.WriteFile(filepath.Join(stateDir, "create_user.users"), []byte(me.Username+"\n"), 0644)
+
+	got, err := parseRemoveModules("xfce,xrdp,create_user,ai_cli", Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ai_cli", "xrdp", "xfce", "create_user"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("порядок удаления %v, ожидалось %v (обратный порядку установки)", got, want)
+	}
+	for _, id := range []string{"update", "upgrade_ubuntu"} {
+		if _, err := parseRemoveModules(id, Config{}); err == nil {
+			t.Errorf("модуль %s не должен удаляться", id)
+		}
+	}
+	// Установлено не программой (нет отметки) — не трогаем, даже если компонент есть в системе.
+	if _, err := parseRemoveModules("docker", Config{}); err == nil || !strings.Contains(err.Error(), "не устанавливался") {
+		t.Errorf("docker без отметки программы не должен удаляться: %v", err)
+	}
+	all, _ := parseRemoveModules("all", Config{})
+	if !reflect.DeepEqual(all, []string{"ai_cli", "xrdp", "xfce", "create_user"}) {
+		t.Errorf("--remove all = %v", all)
+	}
+}
+
+func TestEveryRemovableModuleHasUninstall(t *testing.T) {
+	dryRun = true
+	defer func() { dryRun = false }()
+	old := stateDir
+	stateDir = t.TempDir()
+	defer func() { stateDir = old }()
+	for _, m := range getModuleDefs() {
+		cfg := Config{TargetUser: "alice", TargetHome: t.TempDir(), Modules: []string{m.ID}}
+		err := uninstallModule(m.ID, &cfg)
+		if m.Removable && err != nil {
+			t.Errorf("удаление %s в dry-run вернуло ошибку: %v", m.ID, err)
+		}
+		if !m.Removable && err == nil {
+			t.Errorf("для %s удаление должно быть недоступно", m.ID)
+		}
+	}
+}
+
+func TestValidateRemovePlanProtectsAccess(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	oldState, oldGroup := stateDir, groupFile
+	stateDir, groupFile = t.TempDir(), filepath.Join(t.TempDir(), "group")
+	defer func() { stateDir, groupFile = oldState, oldGroup }()
+
+	_ = os.WriteFile(filepath.Join(stateDir, "create_user.users"), []byte(me.Username+"\nghost-user-xyz\n"), 0644)
+	if got := existingCreatedUsers(); !reflect.DeepEqual(got, []string{me.Username}) {
+		t.Fatalf("existingCreatedUsers = %v", got)
+	}
+
+	cfg := Config{TargetUser: me.Username, Modules: []string{"create_user"}}
+	if err := validateRemovePlan(&cfg); err == nil || !strings.Contains(err.Error(), "это вы") {
+		t.Errorf("нельзя удалять пользователя, от имени которого запущена программа: %v", err)
+	}
+
+	cfg.TargetUser = "someone-else"
+	_ = os.WriteFile(groupFile, []byte("sudo:x:27:"+me.Username+"\n"), 0644)
+	if err := validateRemovePlan(&cfg); err == nil || !strings.Contains(err.Error(), "администратора") {
+		t.Errorf("нельзя удалять последнего администратора: %v", err)
+	}
+
+	cfg.Modules = []string{"update"}
+	if err := validateRemovePlan(&cfg); err == nil {
+		t.Error("update нельзя удалить")
+	}
+}
+
+func TestRemovalSummaryWarnings(t *testing.T) {
+	s := removalSummary([]string{"docker", "ssh_hardening", "xrdp"})
+	for _, want := range []string{"Docker", "SSH", "RDP-сессии", "xrdp"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("в подтверждении нет %q:\n%s", want, s)
+		}
+	}
+}
+
+// Учёт пакетов: apt_install запоминает только новые пакеты, apt_purge_recorded удаляет
+// только их и не трогает KEEP_PKGS. apt-get и dpkg-query подменены заглушками.
+func TestAptInstallRecordsOnlyNewPackages(t *testing.T) {
+	dryRun = false
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(bin, 0755)
+	db := filepath.Join(dir, "installed")
+	_ = os.WriteFile(db, []byte("curl\n"), 0644)
+	_ = os.WriteFile(filepath.Join(bin, "dpkg-query"), []byte("#!/bin/bash\nif grep -qx \"${@: -1}\" \""+db+"\"; then printf 'install ok installed'; else exit 1; fi\n"), 0755)
+	_ = os.WriteFile(filepath.Join(bin, "apt-mark"), []byte("#!/bin/bash\necho \"apt-mark $*\" >> \""+dir+"/apt.log\"\n[ \"$1\" = showauto ] && [ \"$2\" = curl ] && echo curl\nexit 0\n"), 0755)
+	_ = os.WriteFile(filepath.Join(bin, "apt-get"), []byte(`#!/bin/bash
+echo "apt-get $*" >> "`+dir+`/apt.log"
+for a in "$@"; do case "$a" in -*|install|purge|autoremove) ;; *) echo "$a" >> "`+db+`";; esac; done
+`), 0755)
+
+	oldLog, oldState := logPath, stateDir
+	logPath, stateDir = filepath.Join(dir, "log"), filepath.Join(dir, "state")
+	defer func() { logPath, stateDir = oldLog, oldState }()
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+
+	currentModule = "xfce"
+	if err := runBash(Config{}, "apt_install curl xfce4 zsh"); err != nil {
+		t.Fatalf("apt_install: %v", err)
+	}
+	rec, _ := os.ReadFile(filepath.Join(stateDir, "xfce.packages"))
+	if string(rec) != "xfce4\nzsh\n" {
+		t.Errorf("записано %q, ожидались только новые пакеты xfce4, zsh", rec)
+	}
+
+	if err := runBash(Config{}, "apt_purge_recorded", "KEEP_PKGS=zsh"); err != nil {
+		t.Fatalf("apt_purge_recorded: %v", err)
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "apt.log"))
+	if !strings.Contains(string(log), "purge xfce4\n") {
+		t.Errorf("ожидался purge только xfce4, лог:\n%s", log)
+	}
+	if !strings.Contains(string(log), "apt-mark auto curl") {
+		t.Errorf("уже стоявшая автоматическая зависимость должна остаться «auto»:\n%s", log)
+	}
+	if strings.Contains(string(log), "purge curl") || strings.Contains(string(log), "purge xfce4 zsh") {
+		t.Errorf("удалены лишние пакеты:\n%s", log)
+	}
+	if fileExists(filepath.Join(stateDir, "xfce.packages")) {
+		t.Error("после удаления учёт пакетов должен быть очищен")
+	}
+}
+
+func TestRemovePluginFromPanelXML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xfce4-panel.xml")
+	xml := `<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <value type="int" value="26"/>
+    <property name="panel-2" type="empty">
+      <property name="plugin-ids" type="array">
+        <value type="int" value="20"/>
+        <value type="int" value="26"/>
+        <value type="int" value="21"/>
+      </property>
+    </property>
+  </property>
+</channel>`
+	_ = os.WriteFile(path, []byte(xml), 0644)
+	if err := removePluginFromPanelXML(path, "26"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if strings.Count(string(got), `value="26"`) != 1 {
+		t.Errorf("26 должен остаться только в списке panels:\n%s", got)
+	}
+	if !strings.Contains(string(got), "<value type=\"int\" value=\"20\"/>\n        <value type=\"int\" value=\"21\"/>") {
+		t.Errorf("plugin-ids испорчен:\n%s", got)
+	}
+}
+
+func TestPanelScriptSyntax(t *testing.T) {
+	for _, f := range []string{"configs/vps-setup-panel.sh", "configs/vps-setup-launch.sh"} {
+		if out, err := exec.Command("bash", "-n", f).CombinedOutput(); err != nil {
+			t.Errorf("%s: %v\n%s", f, err, out)
+		}
+	}
+}
+
+func TestSysInfoParsers(t *testing.T) {
+	if got := parseOSRelease("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n"); got != "Ubuntu 24.04.1 LTS" {
+		t.Errorf("parseOSRelease = %q", got)
+	}
+	if got := parseCPUModel("processor : 0\nmodel name\t: Intel(R) Xeon(R)   CPU @ 2.20GHz\n", ""); got != "Intel(R) Xeon(R) CPU @ 2.20GHz" {
+		t.Errorf("x86 cpu = %q", got)
+	}
+	if got := parseCPUModel("processor : 0\nBogoMIPS : 50.00\n", "Architecture: aarch64\nVendor ID: ARM\nModel name: Neoverse-N1\n"); got != "ARM Neoverse-N1" {
+		t.Errorf("arm cpu = %q", got)
+	}
+	total, avail, swap := parseMeminfo("MemTotal:       24563440 kB\nMemFree: 1 kB\nMemAvailable:   20000000 kB\nSwapTotal:       2097148 kB\n")
+	if total != 24563440*1024 || avail != 20000000*1024 || swap != 2097148*1024 {
+		t.Errorf("meminfo = %d %d %d", total, avail, swap)
+	}
+	// util-linux 2.37 (Ubuntu 22.04) и более новые/старые форматы JSON
+	disks := parseLsblk([]byte(`{"blockdevices":[{"name":"sda","size":214748364800,"type":"disk","model":"BlockVolume","rota":false},
+		{"name":"loop0","size":"1000","type":"loop","model":null,"rota":"0"},
+		{"name":"vdb","size":"53687091200","type":"disk","model":null,"rota":"1"}]}`))
+	if len(disks) != 2 || disks[0].Name != "sda" || disks[0].Size != 214748364800 || disks[0].Rotational ||
+		disks[1].Name != "vdb" || !disks[1].Rotational || disks[1].Model != "" {
+		t.Errorf("parseLsblk = %+v", disks)
+	}
+	if got := humanBytes(214748364800); got != "200.0 ГБ" {
+		t.Errorf("humanBytes = %q", got)
+	}
+	for n, want := range map[int]string{1: "ядро", 2: "ядра", 4: "ядра", 5: "ядер", 11: "ядер", 12: "ядер", 21: "ядро", 22: "ядра"} {
+		if got := pluralRu(n, "ядро", "ядра", "ядер"); got != want {
+			t.Errorf("pluralRu(%d) = %q, want %q", n, got, want)
+		}
+	}
+	out := formatSysInfo(collectSysInfo())
+	for _, want := range []string{"ОС", "Процессор", "Память", "Диски"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в сведениях о системе нет %q:\n%s", want, out)
+		}
+	}
+}

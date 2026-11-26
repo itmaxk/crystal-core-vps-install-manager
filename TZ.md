@@ -19,10 +19,14 @@
 
 ## 4. Функциональные требования
 * **Брендинг:** при запуске (кроме `--status --json`) выводится баннер Crystal-Core с Unicode-кристаллом, описанием услуг автоматизации бизнеса и контактами (`https://crystal-core.com/`, `info@crystal-core.com`).
-* **17 модулей установки** (в порядке выполнения): `create_user`, `update`, `swap`, `xfce`, `xrdp`, `ru_layout`, `kitty_fonts`, `zsh_starship`, `bbr`, `tailscale`, `ssh_hardening`, `fail2ban_ufw`, `unattended`, `ai_cli`, `docker`, `ollama`, `upgrade_ubuntu`.
+* **18 модулей установки** (в порядке выполнения): `create_user`, `update`, `swap`, `xfce`, `xrdp`, `panel_launcher`, `ru_layout`, `kitty_fonts`, `zsh_starship`, `bbr`, `tailscale`, `ssh_hardening`, `fail2ban_ufw`, `unattended`, `ai_cli`, `docker`, `ollama`, `upgrade_ubuntu`.
 * **Порядок выполнения** фиксирован и не зависит от порядка выбора: первый запуск обычно идёт на сервере без графики, поэтому рабочий стол и RDP ставятся первыми, а `upgrade_ubuntu` (переход на новую LTS, требует перезагрузки) — последним.
-* **Быстрый старт:** при отсутствии XFCE/XRDP меню по умолчанию предлагает набор `create_user` (под root), `swap`, `xfce`, `xrdp`, `ru_layout`; в CLI — `--preset rdp`.
-* **CLI-режимы:** `--status`, `--json`, `--preset`, `--only`, `--new-user` (+ `VPS_SETUP_PASSWORD`), `--user`, `--ssh-port`, `--auto-reboot`, `--dry-run`, `--self-update`, `--version`.
+* **Быстрый старт:** при отсутствии XFCE/XRDP меню по умолчанию предлагает набор `create_user` (под root), `swap`, `xfce`, `xrdp`, `panel_launcher`, `ru_layout`; в CLI — `--preset rdp`.
+* **Сведения о сервере:** при запуске (кроме `--version` и `--status --json`) выводятся версия ОС и ядра, архитектура, процессор и число ядер, ОЗУ и swap, диски (`lsblk`) и заполненность `/`.
+* **Главное меню:** «Быстрый старт», «Полная настройка», «Удаление установленных компонентов», «Состояние модулей», «Выход». Из каждого подменю — возврат в главное меню по `Esc` и явным пунктом «← Назад».
+* **Удаление:** выборочно или всё (`--remove <list|all>`), в обратном порядке. Удаляются только модули, установленные программой, и только пакеты, которых не было до установки (учёт в `/var/lib/vps-setup`); исходные настройки восстанавливаются. `update` и `upgrade_ubuntu` не удаляются.
+* **Значок программы (`panel_launcher`):** бинарник копируется в `/usr/local/bin/vps-setup`; значок добавляется в меню приложений и на нижнюю панель XFCE (в открытых сессиях — сразу, в новых — при входе, один раз).
+* **CLI-режимы:** `--status`, `--json`, `--preset`, `--only`, `--remove`, `--new-user` (+ `VPS_SETUP_PASSWORD`), `--user`, `--ssh-port`, `--auto-reboot`, `--dry-run`, `--self-update`, `--version`.
 
 ## 5. Требования к безопасности и надежности
 * Пароль нового пользователя передается через `stdin` в `chpasswd` (исключение утечки в `ps aux` и логах).

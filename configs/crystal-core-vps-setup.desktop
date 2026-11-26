@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Crystal-Core VPS Install Manager
+GenericName=Настройка сервера
+Comment=Установка, удаление и состояние компонентов сервера (vps-setup)
+Exec=/usr/local/lib/vps-setup/launch.sh
+Icon=crystal-core-vps-setup
+Terminal=true
+Categories=System;Settings;
+Keywords=vps;server;setup;xrdp;crystal;
+StartupNotify=false
