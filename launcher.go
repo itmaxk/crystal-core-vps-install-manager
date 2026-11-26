@@ -35,6 +35,15 @@ type panelItem struct {
 	Desktop string // содержимое .desktop-файла
 	SVGIcon string // своя иконка (SVG), если у программы её нет
 	Menu    bool   // добавить и в меню приложений (/usr/share/applications)
+	Wrapper string // скрипт запуска (кладётся в appsDir под именем без .desktop)
+}
+
+// appsDir — скрипты запуска консольных программ. Значок указывает на скрипт без
+// аргументов: так команда одинаково работает в любом терминале (Kitty, xfce4-terminal).
+const appsDir = launcherLibDir + "/apps"
+
+func (p panelItem) wrapperPath() string {
+	return appsDir + "/" + strings.TrimPrefix(p.iconName(), panelItemPrefix)
 }
 
 func (p panelItem) iconName() string { return strings.TrimSuffix(p.Name, ".desktop") }
@@ -137,6 +146,11 @@ func registerPanelItems(cfg Config, items []panelItem) error {
 				return err
 			}
 		}
+		if it.Wrapper != "" {
+			if err := writeBytesFile(it.wrapperPath(), []byte(it.Wrapper), 0755, it.Name+" (запуск)"); err != nil {
+				return err
+			}
+		}
 	}
 	return runBash(cfg, applyInSessionsFn+refreshDesktopCachesFn+`
 		apply_in_sessions sync
@@ -150,7 +164,7 @@ func unregisterPanelItems(cfg Config, items []panelItem) error {
 	var names []string
 	for _, it := range items {
 		names = append(names, it.Name)
-		for _, p := range []string{filepath.Join(panelRegistryDir, it.Name), filepath.Join("/usr/share/applications", it.Name), it.svgPath()} {
+		for _, p := range []string{filepath.Join(panelRegistryDir, it.Name), filepath.Join("/usr/share/applications", it.Name), it.svgPath(), it.wrapperPath()} {
 			if dryRun {
 				if fileExists(p) {
 					fmt.Println(dryStyle.Render("  [DRY-RUN] Удаление файла: " + p))
@@ -185,6 +199,10 @@ func unregisterPanelItems(cfg Config, items []panelItem) error {
 		_ = os.Remove(filepath.Dir(panelRegistryDir))
 		_ = os.Remove(launcherLibDir)
 	}
+	if !dryRun {
+		_ = os.Remove(appsDir)
+		_ = os.Remove(launcherLibDir)
+	}
 	return nil
 }
 
@@ -211,8 +229,7 @@ Categories=System;TerminalEmulator;
 	}
 }
 
-// AI-утилиты консольные: значок открывает терминал с запущенной программой.
-// Запуск через `bash -lc`, чтобы подхватился ~/.local/bin (там живут uv и aider).
+// AI-утилиты консольные: значок открывает терминал со скриптом запуска (appsDir).
 type aiTool struct {
 	id, bin, title, comment, letters, color string
 }
@@ -227,20 +244,86 @@ var aiTools = []aiTool{
 
 func (t aiTool) panelItem() panelItem {
 	name := panelItemPrefix + t.id + ".desktop"
-	return panelItem{
-		Name: name,
-		Menu: true,
-		Desktop: fmt.Sprintf(`[Desktop Entry]
+	it := panelItem{
+		Name:    name,
+		Menu:    true,
+		SVGIcon: letterTileSVG(t.letters, t.color),
+		Wrapper: toolWrapper(t.title, t.bin),
+	}
+	it.Desktop = fmt.Sprintf(`[Desktop Entry]
 Version=1.0
 Type=Application
 Name=%s
 Comment=%s
-Exec=bash -lc %s
+Exec=%s
 Icon=%s
 Terminal=true
 Categories=Development;
-`, t.title, t.comment, t.bin, strings.TrimSuffix(name, ".desktop")),
-		SVGIcon: letterTileSVG(t.letters, t.color),
+`, t.title, t.comment, it.wrapperPath(), it.iconName())
+	return it
+}
+
+// toolWrapper — скрипт запуска консольной программы из меню/панели: login-shell
+// (подхватывает ~/.local/bin, куда ставятся uv и aider), понятное сообщение, если
+// программы нет, и пауза перед закрытием окна, если она завершилась с ошибкой.
+func toolWrapper(title, bin string) string {
+	return fmt.Sprintf(`#!/bin/bash -l
+# Crystal-Core VPS Install Manager: запуск %[1]s из меню и с панели XFCE.
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME" || exit 1
+if ! command -v %[2]s >/dev/null 2>&1; then
+	echo "%[1]s не найден. Установите модуль ai_cli: sudo vps-setup"
+	read -r -p "Нажмите Enter, чтобы закрыть окно..." _
+	exit 1
+fi
+%[2]s "$@"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	echo
+	echo "%[1]s завершился с кодом $rc."
+	read -r -p "Нажмите Enter, чтобы закрыть окно..." _
+fi
+exit "$rc"
+`, title, bin)
+}
+
+// repairKnownIssues чинит то, что поставили версии до 1.2.1, при любом запуске от root:
+//   - helper Kitty передавал терминалу команду одной строкой («kitty -- "%s"»), и значки
+//     консольных программ падали с «failed to launch child: ... No such file or directory»;
+//   - значки AI-утилит запускали «bash -lc <программа>» — переводим их на скрипты запуска.
+func repairKnownIssues(cfg Config) {
+	if dryRun || os.Geteuid() != 0 {
+		return
+	}
+	repaired := false
+	homes, _ := filepath.Glob("/home/*")
+	for _, home := range append(homes, "/root") {
+		p := filepath.Join(home, ".local", "share", "xfce4", "helpers", "kitty.desktop")
+		data, err := os.ReadFile(p)
+		if err != nil || !bytes.Contains(data, []byte(`kitty -- "%s"`)) {
+			continue
+		}
+		fixed := bytes.ReplaceAll(data, []byte(`X-XFCE-CommandsWithParameter=kitty -- "%s"`), []byte(`X-XFCE-CommandsWithParameter=kitty %s`))
+		if os.WriteFile(p, fixed, 0644) == nil {
+			repaired = true
+		}
+	}
+
+	var stale []panelItem
+	for _, t := range aiTools {
+		if fileContains(filepath.Join(panelRegistryDir, t.panelItem().Name), "Exec=bash -lc") {
+			stale = append(stale, t.panelItem())
+		}
+	}
+	if len(stale) > 0 {
+		currentModule = "ai_cli"
+		if registerPanelItems(cfg, stale) == nil {
+			repaired = true
+		}
+	}
+	if repaired {
+		appendLog("Исправлен запуск программ со значков панели (helper Kitty / скрипты запуска AI-утилит)\n")
+		fmt.Println(dimStyle.Render("Исправлен запуск программ со значков на панели XFCE."))
 	}
 }
 

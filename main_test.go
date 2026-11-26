@@ -644,3 +644,49 @@ func TestIsNewerVersion(t *testing.T) {
 		}
 	}
 }
+
+// Значки, открывающиеся в терминале, должны запускать одну команду без аргументов:
+// exo передаёт её терминалу, и Kitty с командой «bash -lc claude» падал с
+// «failed to launch child: ... No such file or directory».
+func TestTerminalPanelItemsUseSingleExecutable(t *testing.T) {
+	items := append(allAIToolItems(), kittyPanelItem(), vpsSetupPanelItem())
+	for _, it := range items {
+		var exec string
+		terminal := false
+		for _, line := range strings.Split(it.Desktop, "\n") {
+			if strings.HasPrefix(line, "Exec=") {
+				exec = strings.TrimPrefix(line, "Exec=")
+			}
+			if line == "Terminal=true" {
+				terminal = true
+			}
+		}
+		if exec == "" {
+			t.Errorf("%s: нет Exec", it.Name)
+		}
+		if terminal && strings.ContainsAny(exec, " \t") {
+			t.Errorf("%s: Exec=%q — для Terminal=true нужна одна команда без аргументов", it.Name, exec)
+		}
+		if it.Wrapper != "" {
+			if exec != it.wrapperPath() {
+				t.Errorf("%s: Exec=%q, ожидался скрипт %s", it.Name, exec, it.wrapperPath())
+			}
+			f := filepath.Join(t.TempDir(), "w.sh")
+			_ = os.WriteFile(f, []byte(it.Wrapper), 0755)
+			if out, err := bashSyntaxCheck(f); err != nil {
+				t.Errorf("%s: скрипт запуска с ошибкой синтаксиса: %v\n%s", it.Name, err, out)
+			}
+		}
+	}
+}
+
+func bashSyntaxCheck(path string) ([]byte, error) {
+	return exec.Command("bash", "-n", path).CombinedOutput()
+}
+
+func TestKittyHelperPassesArgumentsSeparately(t *testing.T) {
+	src, _ := os.ReadFile("modules.go")
+	if !strings.Contains(string(src), "X-XFCE-CommandsWithParameter=kitty %s\n") || strings.Contains(string(src), `kitty -- "%s"`) {
+		t.Error("helper Kitty должен передавать аргументы без кавычек (exo сам разбивает команду на аргументы)")
+	}
+}

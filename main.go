@@ -129,6 +129,7 @@ func main() {
 	}
 	cfg.NewUsername = strings.TrimSpace(*newUserFlag)
 	cfg.Password = os.Getenv(passwordEnv)
+	repairKnownIssues(cfg)
 
 	switch {
 	case *removeFlag != "":

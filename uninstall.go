@@ -308,6 +308,25 @@ func uninstallModule(mod string, cfg *Config) error {
 	case "panel_launcher":
 		return uninstallLauncher(cfg)
 
+	case "browser":
+		err := forEachModuleUser(mod, *cfg, func(u Config) error {
+			return runBash(u, `
+				HELPERS="$TARGET_HOME/.config/xfce4/helpers.rc"
+				if [ -f "$HELPERS" ]; then
+					as_user sed -i '/^WebBrowser=firefox$/d' "$HELPERS"
+				fi
+			`)
+		})
+		if err != nil {
+			return err
+		}
+		return runBash(*cfg, `
+			apt_purge_recorded
+			if ! is_installed firefox; then
+				rm -f /etc/apt/sources.list.d/mozilla.list /etc/apt/preferences.d/mozilla /etc/apt/keyrings/packages.mozilla.org.asc
+			fi
+		`, "KEEP_PKGS=ca-certificates\ncurl\ngnupg")
+
 	case "ru_layout":
 		err := forEachModuleUser(mod, *cfg, func(u Config) error {
 			return runBash(u, `rm -f "$TARGET_HOME/.config/autostart/setxkbmap.desktop"`)
@@ -528,7 +547,7 @@ EOF
 // perUserModules меняют файлы в домашнем каталоге целевого пользователя. Для них
 // запоминаем, для кого выполнялась установка, чтобы удаление почистило именно там
 // (например, после create_user модули ставятся новому пользователю, а удаляет их другой).
-var perUserModules = map[string]bool{"xrdp": true, "ru_layout": true, "kitty_fonts": true, "zsh_starship": true, "ai_cli": true}
+var perUserModules = map[string]bool{"browser": true, "xrdp": true, "ru_layout": true, "kitty_fonts": true, "zsh_starship": true, "ai_cli": true}
 
 func recordModuleUser(mod, username string) {
 	if dryRun || !perUserModules[mod] || contains(moduleUsers(mod), username) {

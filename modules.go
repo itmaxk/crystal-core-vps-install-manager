@@ -19,7 +19,7 @@ var (
 )
 
 // Модули быстрого старта: на «голом» сервере первым делом нужен рабочий стол и вход по RDP.
-var rdpPresetModules = []string{"create_user", "swap", "xfce", "xrdp", "panel_launcher", "ru_layout"}
+var rdpPresetModules = []string{"create_user", "swap", "xfce", "xrdp", "panel_launcher", "browser", "ru_layout"}
 
 // Модули, которым не нужен apt.
 var noAptModules = map[string]bool{"bbr": true, "swap": true, "ssh_hardening": true, "create_user": true, "panel_launcher": true}
@@ -84,6 +84,14 @@ func getModuleDefs() []ModuleDef {
 			DefaultOn:   true,
 			Removable:   true,
 			IsReady:     func(Config) bool { return fileExists(desktopFilePath) },
+		},
+		{
+			ID:          "browser",
+			Title:       "Браузер Firefox",
+			Description: "deb-пакет из репозитория Mozilla (не snap) + русский язык; браузер по умолчанию",
+			DefaultOn:   true,
+			Removable:   true,
+			IsReady:     func(Config) bool { return fileExists("/usr/lib/firefox/firefox") },
 		},
 		{
 			ID:          "ru_layout",
@@ -342,6 +350,35 @@ func executeModule(mod string, cfg *Config) error {
 	case "panel_launcher":
 		return moduleLauncher(cfg)
 
+	case "browser":
+		return runBash(*cfg, `
+			fix_user_dirs
+			apt_install ca-certificates curl gnupg
+			install -m 0755 -d /etc/apt/keyrings
+			if [ ! -f /etc/apt/keyrings/packages.mozilla.org.asc ]; then
+				curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc
+				chmod a+r /etc/apt/keyrings/packages.mozilla.org.asc
+			fi
+			echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" > /etc/apt/sources.list.d/mozilla.list
+			# Приоритет 1000: deb от Mozilla вместо snap-заглушки Ubuntu (snap плохо работает в RDP-сессиях).
+			cat > /etc/apt/preferences.d/mozilla <<'EOF'
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+EOF
+			apt-get update
+			apt_install firefox firefox-l10n-ru
+
+			# Браузер по умолчанию в XFCE (значок «Веб-браузер» на нижней панели).
+			as_user mkdir -p "$TARGET_HOME/.config/xfce4"
+			HELPERS="$TARGET_HOME/.config/xfce4/helpers.rc"
+			if [ -f "$HELPERS" ] && grep -q '^WebBrowser=' "$HELPERS"; then
+				as_user sed -i 's/^WebBrowser=.*/WebBrowser=firefox/' "$HELPERS"
+			else
+				echo "WebBrowser=firefox" | as_user tee -a "$HELPERS" >/dev/null
+			fi
+		`)
+
 	case "ru_layout":
 		return runBash(*cfg, `
 			fix_user_dirs
@@ -390,7 +427,7 @@ Encoding=UTF-8
 Type=X-XFCE-Helper
 X-XFCE-Category=TerminalEmulator
 X-XFCE-Commands=kitty
-X-XFCE-CommandsWithParameter=kitty -- "%s"
+X-XFCE-CommandsWithParameter=kitty %s
 Icon=kitty
 Name=kitty
 EOF
