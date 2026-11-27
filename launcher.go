@@ -325,6 +325,22 @@ func repairKnownIssues(cfg Config) {
 		appendLog("Исправлен запуск программ со значков панели (helper Kitty / скрипты запуска AI-утилит)\n")
 		fmt.Println(dimStyle.Render("Исправлен запуск программ со значков на панели XFCE."))
 	}
+
+	// Иконка программы сменилась (1.2.2): обновляем уже установленную копию.
+	iconChanged := false
+	for _, p := range []string{iconPath, pixmapPath} {
+		data, err := os.ReadFile(p)
+		if err != nil || bytes.Equal(data, iconPNG) {
+			continue
+		}
+		if os.WriteFile(p, iconPNG, 0644) == nil {
+			iconChanged = true
+		}
+	}
+	if iconChanged {
+		_ = runBash(cfg, refreshDesktopCachesFn)
+		appendLog("Обновлена иконка программы\n")
+	}
 }
 
 // letterTileSVG — простая иконка-плитка с буквами (без чужих логотипов).
